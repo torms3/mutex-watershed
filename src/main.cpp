@@ -177,8 +177,8 @@ struct MutexWatershed {
     }
 
     void fast_2d_set_bounds(){
-        xt::view(bounds, xt::range(0, image_shape(0)-1, int64_t(dam_stride(0))),
-                         xt::range(0, image_shape(1)-1, int64_t(dam_stride(1))),
+        xt::view(bounds, xt::range(0, image_shape(0), int64_t(dam_stride(0))),
+                         xt::range(0, image_shape(1), int64_t(dam_stride(1))),
                          xt::all()) = 1;
 
         xt::view(bounds, xt::all(),
@@ -186,22 +186,24 @@ struct MutexWatershed {
                          xt::range(0, num_attractive_channels, int64_t(1))) = 1;
 
         for (uint64_t d = 0; d < directions; ++d) {
-            if (offsets(d, 0) > 0)
-                xt::view(bounds, xt::range(image_shape(0)-1, image_shape(0)-offsets(d, 0)-1, int64_t(-1)), xt::all(), d) = 0;
-            else if (offsets(d, 0) < 0)
-                xt::view(bounds, xt::range(0., -offsets(d, 0), 1), xt::all(), d) = 0;
-            if (offsets(d, 1) > 0)
-                xt::view(bounds, xt::all(), xt::range(image_shape(1)-1, image_shape(1)-offsets(d, 1)-1, int64_t(-1)), d) = 0;
-            else if (offsets(d, 1) < 0)
-                xt::view(bounds, xt::all(), xt::range(0., -offsets(d, 1), 1), d) = 0;
+            auto o0 = offsets(d, 0);
+            if (o0 > 0)
+                xt::view(bounds, xt::range(image_shape(0)-1, image_shape(0)-o0-1, int64_t(-1)), xt::all(), d) = 0;
+            else if (o0 < 0)
+                xt::view(bounds, xt::range(0., -o0, 1), xt::all(), d) = 0;            
+            auto o1 = offsets(d, 1);
+            if (o1 > 0)
+                xt::view(bounds, xt::all(), xt::range(image_shape(1)-1, image_shape(1)-o1-1, int64_t(-1)), d) = 0;
+            else if (o1 < 0)
+                xt::view(bounds, xt::all(), xt::range(0., -o1, 1), d) = 0;
         }
     }
 
     void fast_3d_set_bounds(){
 
-        xt::view(bounds, xt::range(0, image_shape(0)-1, int64_t(dam_stride(0))),
-                         xt::range(0, image_shape(1)-1, int64_t(dam_stride(1))),
-                         xt::range(0, image_shape(2)-1, int64_t(dam_stride(2))),
+        xt::view(bounds, xt::range(0, image_shape(0), int64_t(dam_stride(0))),
+                         xt::range(0, image_shape(1), int64_t(dam_stride(1))),
+                         xt::range(0, image_shape(2), int64_t(dam_stride(2))),
                          xt::all()) = 1;
 
         xt::view(bounds, xt::all(),
@@ -210,18 +212,21 @@ struct MutexWatershed {
                          xt::range(0, num_attractive_channels, int64_t(1))) = 1;
 
         for (uint64_t d = 0; d < directions; ++d) {
-            if (offsets(d, 0) > 0)
-                xt::view(bounds, xt::range(image_shape(0)-1, image_shape(0)-offsets(d, 0)-1, int64_t(-1)), xt::all(), xt::all(), d) = 0;
-            else if (offsets(d, 0) < 0)
-                xt::view(bounds, xt::range(0., -offsets(d, 0), 1.), xt::all(), xt::all(), d) = 0;
-            if (offsets(d, 1) > 0)
-                xt::view(bounds, xt::all(), xt::range(image_shape(1)-1, image_shape(1)-offsets(d, 1)-1, int64_t(-1)), xt::all(), d) = 0;
-            else if (offsets(d, 1) < 0)
-                xt::view(bounds, xt::all(), xt::range(0., -offsets(d, 1), 1.), xt::all(), d) = 0;
-            if (offsets(d, 2) > 0)
-                xt::view(bounds, xt::all(), xt::all(), xt::range(image_shape(2)-1, image_shape(2)-offsets(d, 2)-1, int64_t(-1)), d) = 0;
-            else if (offsets(d, 2) < 0)
-                xt::view(bounds, xt::all(), xt::all(), xt::range(0., -offsets(d, 2), 1.), d) = 0;
+            auto o0 = offsets(d, 0);
+            if (o0 > 0)
+                xt::view(bounds, xt::range(image_shape(0)-1, image_shape(0)-o0-1, int64_t(-1)), xt::all(), xt::all(), d) = 0;
+            else if (o0 < 0)
+                xt::view(bounds, xt::range(0., -o0, 1.), xt::all(), xt::all(), d) = 0;
+            auto o1 = offsets(d, 1);
+            if (o1 > 0)
+                xt::view(bounds, xt::all(), xt::range(image_shape(1)-1, image_shape(1)-o1-1, int64_t(-1)), xt::all(), d) = 0;
+            else if (o1 < 0)
+                xt::view(bounds, xt::all(), xt::range(0., -o1, 1.), xt::all(), d) = 0;
+            auto o2 = offsets(d, 2);
+            if (o2 > 0)
+                xt::view(bounds, xt::all(), xt::all(), xt::range(image_shape(2)-1, image_shape(2)-o2-1, int64_t(-1)), d) = 0;
+            else if (o2 < 0)
+                xt::view(bounds, xt::all(), xt::all(), xt::range(0., -o2, 1.), d) = 0;
         }
     }
 
@@ -269,6 +274,21 @@ struct MutexWatershed {
             return (*parent)(i);
         }
     }
+
+    // alternative version using while-loop
+    // uint64_t find(uint64_t id) {
+    //     uint64_t n(id);
+    //     while (n != (*parent)(n)) {
+    //         n = (*parent)(n);
+    //     }
+
+    //     uint64_t i(id), x;
+    //     while (n != i) {
+    //         x = (*parent)(id);
+    //         (*parent)(id) = n;
+    //         i = x;
+    //     }
+    // }
 
     inline uint64_t _get_direction( uint64_t e) {
         return e / n_points;
@@ -379,6 +399,7 @@ struct MutexWatershed {
 
         if (dam_graph[root_to].size() == 0){
             dam_graph[root_to] = dam_graph[root_from];
+            dam_graph[root_from].clear();  // @kisuk
             return;
         }
 
