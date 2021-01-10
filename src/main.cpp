@@ -41,7 +41,6 @@ struct MutexWatershed
         n_dims_ = image_shape_.size();
         n_points_ = xt::prod(image_shape_)(0);
         n_directions_ = offsets_.shape()[0];
-        action_counter_ = 0;
 
         strides_ = xt::zeros<int64_t>({n_directions_});
         for ( uint64_t d = 0; d < n_directions_; ++d )
@@ -84,17 +83,6 @@ struct MutexWatershed
     xt::pytensor<uint64_t,1> uc_parent_;
     xt::pytensor<uint64_t,1> uc_rank_;
     xt::pytensor<uint64_t,1> uc_region_size_;
-
-    // Bookkeeping variables
-    uint64_t action_counter_;
-    bool finished_;
-    xt::pyarray<bool> seen_actions;
-    
-    // Constrained data
-    xt::pytensor<uint64_t,1> c_parent_;
-    xt::pytensor<uint64_t,1> c_rank_;
-    xt::pytensor<uint64_t,1> c_region_size_;
-    xt::pytensor<int64_t, 1> c_actions_;    
     xt::pytensor<int64_t, 1> uc_actions_;
 
     // One directional adjacency list
@@ -103,43 +91,23 @@ struct MutexWatershed
     // but saves resources since it does not require relabeling on 
     // graph contraction.
     std::vector<std::vector<int64_t>> dam_graph_;
-    bool active_constraints_;
-    
-    // Buffer for merged dams
-    std::vector<int64_t> dam_buffer_;
+    std::vector<int64_t>              dam_buffer_;
 
     void clear_all()
     {
-        set_uc();
-        clear();
-        c_clear();
-    }
-
-    void clear()
-    {
         // Reset minimum spanning tree
-        action_counter_ = 0;
-        
         uc_parent_ = xt::arange(n_points_);
         uc_rank_ = xt::zeros<uint64_t>({n_points_});
         uc_region_size_ = xt::ones<uint64_t>({n_points_});
-
-        c_region_size_ = xt::ones<uint64_t>({n_points_});
         uc_actions_ = xt::zeros<int64_t>({n_points_ * n_directions_});
-        seen_actions = xt::zeros<bool>({n_points_ * n_directions_});
-        finished_ = false;
-    }
-
-    void c_clear()
-    {
-        // Reset constrained minimum spanning tree
-        c_parent_ = xt::arange(n_points_);
-        c_rank_ = xt::zeros<uint64_t>({n_points_});
-        c_actions_ = xt::zeros<int64_t>({n_points_ * n_directions_});
-
-        region_size_ = &uc_region_size_;
-        active_constraints_ = false;
+        
+        // TODO(kisuk): use shared pointers?
+        // Mutex constraints
+        dam_buffer_.clear();
+        dam_graph_.clear();
         dam_graph_ = std::vector<std::vector<int64_t>>(n_points_);
+        
+        set_uc();
     }
 
     void set_bounds()
@@ -260,6 +228,7 @@ struct MutexWatershed
         dam_stride_ = real_stride;
     }
 
+    // Recursive version
     uint64_t find( uint64_t i )
     {
         if ( (*parent_)(i) == i )
@@ -273,29 +242,32 @@ struct MutexWatershed
         }
     }
 
-    // alternative version using while-loop
-    // uint64_t find(uint64_t id) {
-    //     uint64_t n(id);
-    //     while (n != (*parent_)(n)) {
-    //         n = (*parent_)(n);
+    // Alternative version using while-loop
+    // inline uint64_t find( uint64_t id )
+    // {
+    //     uint64_t root(id), i(id), parent;
+
+    //     while ( root != (*parent_)(root) )
+    //     {
+    //         root = (*parent_)(root);
     //     }
 
-    //     uint64_t i(id), x;
-    //     while (n != i) {
-    //         x = (*parent_)(id);
-    //         (*parent_)(id) = n;
-    //         i = x;
+    //     while ( root != i )
+    //     {
+    //         parent = (*parent_)(i);
+    //         (*parent_)(i) = root;
+    //         i = parent;
     //     }
+
+    //     return root;
     // }
 
-    inline
-    uint64_t _get_direction( uint64_t e )
+    inline uint64_t _get_direction( uint64_t e )
     {
         return e / n_points_;
     }
 
-    inline 
-    uint64_t _get_position( uint64_t e )
+    inline uint64_t _get_position( uint64_t e )
     {
         return e % n_points_;
     }
@@ -326,38 +298,7 @@ struct MutexWatershed
         return region_projection;
     }
 
-    void set_state( const MutexWatershed & ouf )
-    {
-        // Copies segmentation state from other MWS object
-        n_dims_ = ouf.n_dims_;
-        action_counter_ = ouf.action_counter_;
-        strides_ = ouf.strides_;
-        n_points_ = ouf.n_points_;
-        
-        uc_rank_ = ouf.uc_rank_;
-        c_rank_ = ouf.c_rank_;
-        // uc_rank_ = &rank_;
-
-        uc_region_size_ = ouf.uc_region_size_;
-        c_region_size_ = ouf.c_region_size_;
-        
-        uc_parent_ = ouf.uc_parent_;
-        c_parent_ = ouf.c_parent_;
-        // uc_parent_ = &parent;
-        // region_gt_label = ouf.region_gt_label;
-        
-        image_shape_ = ouf.image_shape_;
-        c_actions_ = ouf.c_actions_;
-        uc_actions_ = ouf.uc_actions_;
-        // actions_ = &uc_actions;
-        seen_actions = ouf.seen_actions;
-        dam_graph_ = ouf.dam_graph_;
-
-        set_uc();
-    }
-
-    inline
-    uint64_t is_valid_edge( uint64_t i, uint64_t k )
+    inline uint64_t is_valid_edge( uint64_t i, uint64_t k )
     {
         int64_t index = i;
         for ( int64_t n = n_dims_-1; n >= 0; --n )
@@ -384,18 +325,9 @@ struct MutexWatershed
         return true;
     }
 
-    inline
-    bool check_bounds( uint64_t i, uint64_t d )
+    inline bool check_bounds( uint64_t i, uint64_t d )
     {
         return bounds_(i, d);
-    }
-
-    void set_c()
-    {
-        parent_ = &c_parent_;
-        rank_ = &c_rank_;
-        region_size_ = &c_region_size_;
-        active_constraints_ = true;
     }
 
     void set_uc()
@@ -403,11 +335,10 @@ struct MutexWatershed
         parent_ = &uc_parent_;
         rank_ = &uc_rank_;
         region_size_ = &uc_region_size_;
-        active_constraints_ = false;
+        actions_ = &uc_actions_;
     }
 
-    inline 
-    void merge_dams( uint64_t root_from, uint64_t root_to )
+    inline void merge_dams( uint64_t root_from, uint64_t root_to )
     {
         if ( dam_graph_[root_from].empty() )
             return;
@@ -430,8 +361,7 @@ struct MutexWatershed
         dam_graph_[root_from].clear();
     }
 
-    inline
-    bool is_dam_constrained( uint64_t root_i, uint64_t root_j )
+    inline bool is_dam_constrained( uint64_t root_i, uint64_t root_j )
     {
         auto de_i = dam_graph_[root_i].begin();
         auto de_j = dam_graph_[root_j].begin();
@@ -452,19 +382,12 @@ struct MutexWatershed
         return false;
     }
 
-    inline 
-    bool merge_roots( uint64_t root_i, uint64_t root_j )
+    inline bool merge_roots( uint64_t root_i, uint64_t root_j )
     {
-        if ( !active_constraints_ )
-        {
-            if ( is_dam_constrained(root_i, root_j) ) 
-                return false;
-            merge_dams(root_i, root_j);
-        }
-        else
-        {
-            throw std::runtime_error("not implemented");
-        }
+        if ( is_dam_constrained(root_i, root_j) ) 
+            return false;
+        
+        merge_dams(root_i, root_j);
 
         // merge regions
         (*parent_)(root_i) = root_j;
@@ -472,8 +395,7 @@ struct MutexWatershed
         return true;
     }    
 
-    inline 
-    bool dam_constrained_merge( uint64_t i, uint64_t j )
+    inline bool dam_constrained_merge( uint64_t i, uint64_t j )
     {
         uint64_t root_i = find(i);
         uint64_t root_j = find(j);
@@ -504,8 +426,7 @@ struct MutexWatershed
         }
     }
 
-    inline 
-    bool add_dam_edge( uint64_t i, uint64_t j, uint64_t dam_edge )
+    inline bool add_dam_edge( uint64_t i, uint64_t j, uint64_t dam_edge )
     {
         uint64_t root_i = find(i);
         uint64_t root_j = find(j);
@@ -538,53 +459,7 @@ struct MutexWatershed
         }
     }
 
-    void repulsive_ucc_mst_cut( const xt::pyarray<long> & edge_list, 
-                                uint64_t num_iterations )
-    {
-        finished_ = true;
-        action_counter_ = 0;        
-        for ( auto& e : edge_list )
-        {
-            if ( (num_iterations != 0) and (num_iterations <= action_counter_) )
-                finished_ = false;
-
-            if ( !seen_actions(e) )
-            {
-                seen_actions(e) = true;
-                uint64_t i = _get_position(e);
-                uint64_t d = _get_direction(e);
-                if ( check_bounds(i, d) )
-                {
-                    int64_t j = int64_t(i) + strides_(d);
-                    if ( d < n_attractive_channels_ ) // attractive
-                    {
-                        // unconstrained merge
-                        set_uc();
-                        bool merged = dam_constrained_merge(i, j);
-                        if ( merged ) ++action_counter_;
-                        uc_actions_(e) = merged;
-                    }
-                    else // repulsive
-                    {
-                        set_uc();
-                        uc_actions_(e) = add_dam_edge(i, j, e);
-                    }
-                }
-            }
-        }
-    }
-
-    bool is_finished()
-    {
-        return finished_;
-    }
-
     /////////////// get functions ////////////////////
-
-    auto get_seen_actions()
-    {
-        return seen_actions;
-    }
 
     auto get_flat_label_image_only_merged_pixels()
     {
@@ -594,7 +469,7 @@ struct MutexWatershed
         {
             uint64_t root_i = find(i);
             uint64_t size = (*region_size_)(root_i);
-            label(i) = (size > 1) ? (root_i + 1) : 0; // @kisuk
+            label(i) = (size > 1) ? (root_i + 1) : 0;
         }
         return label;
     }
@@ -605,33 +480,12 @@ struct MutexWatershed
         return get_flat_label_image_only_merged_pixels();
     }
 
-    auto get_flat_c_label_image_only_merged_pixels()
-    {
-        set_c();
-        auto lab_img = get_flat_label_image_only_merged_pixels();
-        set_uc();
-        return lab_img;
-    }
-
     auto get_flat_label_image()
     {
         xt::pyarray<long> label = xt::zeros<long>({n_points_});
         for ( uint64_t i = 0; i < n_points_; ++i )
             label(i) = find(i) + 1;
         return label;
-    }
-
-    auto get_action_counter()
-    {
-        return action_counter_;
-    }
-
-    auto get_flat_c_label_image()
-    {
-        set_c();
-        auto lab_img = get_flat_label_image();
-        set_uc();
-        return lab_img;
     }
 
     auto get_flat_uc_label_image()
@@ -648,11 +502,6 @@ struct MutexWatershed
     auto get_flat_applied_uc_actions()
     {
         return uc_actions_;
-    }
-
-    auto get_flat_applied_c_actions()
-    {
-        return c_actions_;
     }
 };
 
@@ -679,26 +528,17 @@ PYBIND11_PLUGIN(mutex_watershed)
         .def("clear_all", &MutexWatershed::clear_all)
         .def("get_flat_label_image_only_merged_pixels", &MutexWatershed::get_flat_label_image_only_merged_pixels)
         .def("get_flat_uc_label_image_only_merged_pixels", &MutexWatershed::get_flat_uc_label_image_only_merged_pixels)
-        .def("get_flat_c_label_image_only_merged_pixels", &MutexWatershed::get_flat_c_label_image_only_merged_pixels)
         .def("get_flat_label_image", &MutexWatershed::get_flat_label_image)
         .def("get_flat_uc_label_image", &MutexWatershed::get_flat_uc_label_image)
-        .def("get_flat_c_label_image", &MutexWatershed::get_flat_c_label_image)
         .def("get_flat_label_projection", &MutexWatershed::get_flat_label_projection)
-        .def("set_state",  &MutexWatershed::set_state)
         .def("set_bounds",  &MutexWatershed::set_bounds)
         .def("check_bounds",  &MutexWatershed::check_bounds)
         .def("compute_randomized_bounds",  &MutexWatershed::compute_randomized_bounds)
         .def("repulsive_mst_cut",  &MutexWatershed::repulsive_mst_cut)
-        .def("repulsive_ucc_mst_cut",  &MutexWatershed::repulsive_ucc_mst_cut)
         .def("set_uc", &MutexWatershed::set_uc)
         .def("check_bounds", &MutexWatershed::check_bounds)
-        .def("is_finished", &MutexWatershed::is_finished)
-        .def("get_seen_actions", &MutexWatershed::get_seen_actions)
-
-        .def("get_action_counter", &MutexWatershed::get_action_counter)
         .def("get_flat_applied_action", &MutexWatershed::get_flat_applied_action)
-        .def("get_flat_applied_uc_actions", &MutexWatershed::get_flat_applied_uc_actions)
-        .def("get_flat_applied_c_actions", &MutexWatershed::get_flat_applied_c_actions);
+        .def("get_flat_applied_uc_actions", &MutexWatershed::get_flat_applied_uc_actions);
 
     return m.ptr();
 }
