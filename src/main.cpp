@@ -16,18 +16,19 @@
 #include <iostream>
 #include <numeric>
 #include <cmath>
+#include <cassert>
 #include <map>
 #include <set>
 #include <unordered_set>
 #include <random>
 #include <iterator>
+#include <algorithm>
 
 namespace py = pybind11;
 
 struct MutexWatershed
 {
-    // A Watershed Segmentation Execution Engine
-    // Given a ground truth segmentation the constrained Segmentation can be computed in parallel.
+    // A Watershed Segmentation Execution Engine.
 
     MutexWatershed( xt::pytensor<int64_t, 1> image_shape, 
                     xt::pytensor<int64_t, 2> offsets,
@@ -60,7 +61,6 @@ struct MutexWatershed
         set_bounds();
     }
 
-    // TODO: Could be made constant
     uint64_t n_dims_;
     uint64_t n_points_;
     uint64_t n_directions_;
@@ -93,6 +93,11 @@ struct MutexWatershed
     std::vector<std::vector<int64_t>> dam_graph_;
     std::vector<int64_t>              dam_buffer_;
 
+    // @kisuk
+    // using MutexSet = std::unordered_set<int64_t>;
+    // using MutexStorage = std::vector<MutexSet>;
+    // MutexStorage mutexes_;
+
     void clear_all()
     {
         // Reset minimum spanning tree
@@ -106,6 +111,10 @@ struct MutexWatershed
         dam_buffer_.clear();
         dam_graph_.clear();
         dam_graph_ = std::vector<std::vector<int64_t>>(n_points_);
+
+        // @kisuk
+        // mutexes_.clear();
+        // mutexes_ = MutexStorage(n_points_);
         
         set_uc();
     }
@@ -272,6 +281,30 @@ struct MutexWatershed
         return e % n_points_;
     }
 
+    inline std::pair<uint64_t,uint64_t> _get_incident_nodes( uint64_t e )
+    {
+        uint64_t i = _get_position(e);
+        uint64_t d = _get_direction(e);        
+        if ( check_bounds(i, d) )
+        {
+            int64_t j = int64_t(i) + strides_(d);
+            std::pair<uint64_t,uint64_t> nodes = std::minmax(i, uint64_t(j));
+            return nodes;
+        }
+        return std::make_pair(i, std::numeric_limits<uint64_t>::max());
+    }
+
+    inline std::pair<uint64_t,uint64_t> _get_incident_roots( uint64_t e )
+    {
+        uint64_t i, j;
+        std::tie(i, j) = _get_incident_nodes(e);
+        if ( j != std::numeric_limits<uint64_t>::max() )
+        {
+            return std::make_pair(find(i), find(j));
+        }
+        return std::make_pair(find(i), j);
+    }
+
     auto get_flat_label_projection()
     {
         //  This function generates an id-invariant projection of the current segmentation
@@ -340,32 +373,34 @@ struct MutexWatershed
 
     inline void merge_dams( uint64_t root_from, uint64_t root_to )
     {
-        if ( dam_graph_[root_from].empty() )
+        auto& src = dam_graph_[root_from];
+        auto& dst = dam_graph_[root_to];
+
+        if ( src.empty() )
             return;
 
-        if ( dam_graph_[root_to].empty() )
+        if ( dst.empty() )
         {
-            dam_graph_[root_to] = dam_graph_[root_from];
-            dam_graph_[root_from].clear();  // @kisuk
+            dst = src;
+            src.clear();  // @kisuk
             return;
         }
 
         dam_buffer_.clear();
-        dam_buffer_.reserve(std::max(dam_graph_[root_from].size(), dam_graph_[root_to].size()));
+        dam_buffer_.reserve(std::max(src.size(), dst.size()));
 
-        std::merge(dam_graph_[root_from].begin(), dam_graph_[root_from].end(),
-                   dam_graph_[root_to].begin(), dam_graph_[root_to].end(), 
+        std::merge(src.begin(), src.end(),
+                   dst.begin(), dst.end(), 
                    std::back_inserter(dam_buffer_));
 
-        dam_graph_[root_to] = dam_buffer_;
-        dam_graph_[root_from].clear();
+        dst = dam_buffer_;        
+        src.clear();
     }
 
     inline bool is_dam_constrained( uint64_t root_i, uint64_t root_j )
     {
         auto de_i = dam_graph_[root_i].begin();
         auto de_j = dam_graph_[root_j].begin();
-
         while ( de_i != dam_graph_[root_i].end() && de_j != dam_graph_[root_j].end() )
         {
             if ( *de_i < *de_j )
@@ -397,8 +432,8 @@ struct MutexWatershed
 
     inline bool dam_constrained_merge( uint64_t i, uint64_t j )
     {
-        uint64_t root_i = find(i);
-        uint64_t root_j = find(j);
+        auto root_i = find(i);
+        auto root_j = find(j);
     
         if ( root_i != root_j )
         {
@@ -416,20 +451,17 @@ struct MutexWatershed
                 {
                     (*rank_)(root_j) += 1;
                     return true;
-                }
-                return false;
+                }                
             }
         }
-        else
-        {
-            return false;
-        }
+
+        return false;
     }
 
     inline bool add_dam_edge( uint64_t i, uint64_t j, uint64_t dam_edge )
     {
-        uint64_t root_i = find(i);
-        uint64_t root_j = find(j);
+        auto root_i = find(i);
+        auto root_j = find(j);
         if ( root_i != root_j )
         {
             if ( !is_dam_constrained(root_i, root_j) )
@@ -474,12 +506,6 @@ struct MutexWatershed
         return label;
     }
 
-    auto get_flat_uc_label_image_only_merged_pixels()
-    {
-        set_uc();
-        return get_flat_label_image_only_merged_pixels();
-    }
-
     auto get_flat_label_image()
     {
         xt::pyarray<long> label = xt::zeros<long>({n_points_});
@@ -488,20 +514,9 @@ struct MutexWatershed
         return label;
     }
 
-    auto get_flat_uc_label_image()
-    {
-        set_uc();
-        return get_flat_label_image();
-    }
-
     auto get_flat_applied_action()
     {
         return actions_;
-    }
-
-    auto get_flat_applied_uc_actions()
-    {
-        return uc_actions_;
     }
 };
 
@@ -527,9 +542,7 @@ PYBIND11_PLUGIN(mutex_watershed)
         .def(py::init<xt::pytensor<int64_t,1> , xt::pytensor<int64_t,2> , uint64_t, xt::pytensor<uint64_t,1>>())
         .def("clear_all", &MutexWatershed::clear_all)
         .def("get_flat_label_image_only_merged_pixels", &MutexWatershed::get_flat_label_image_only_merged_pixels)
-        .def("get_flat_uc_label_image_only_merged_pixels", &MutexWatershed::get_flat_uc_label_image_only_merged_pixels)
         .def("get_flat_label_image", &MutexWatershed::get_flat_label_image)
-        .def("get_flat_uc_label_image", &MutexWatershed::get_flat_uc_label_image)
         .def("get_flat_label_projection", &MutexWatershed::get_flat_label_projection)
         .def("set_bounds",  &MutexWatershed::set_bounds)
         .def("check_bounds",  &MutexWatershed::check_bounds)
@@ -537,8 +550,7 @@ PYBIND11_PLUGIN(mutex_watershed)
         .def("repulsive_mst_cut",  &MutexWatershed::repulsive_mst_cut)
         .def("set_uc", &MutexWatershed::set_uc)
         .def("check_bounds", &MutexWatershed::check_bounds)
-        .def("get_flat_applied_action", &MutexWatershed::get_flat_applied_action)
-        .def("get_flat_applied_uc_actions", &MutexWatershed::get_flat_applied_uc_actions);
+        .def("get_flat_applied_action", &MutexWatershed::get_flat_applied_action);
 
     return m.ptr();
 }
